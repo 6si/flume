@@ -167,6 +167,21 @@ public class HDFSEventSink extends AbstractSink implements Configurable {
     }
 
     @Override
+    public synchronized BucketWriter get(Object key) {
+        return super.get(key);
+    }
+
+    @Override
+    public synchronized BucketWriter put(String key, BucketWriter writer) {
+      return super.put(key, writer);
+    }
+
+    @Override
+    public synchronized BucketWriter remove(Object key) {
+        return super.remove(key);
+    }
+
+    @Override
     protected boolean removeEldestEntry(Entry<String, BucketWriter> eldest) {
       if (size() > maxOpenFiles) {
         // If we have more that max open files, then close the last one and
@@ -400,21 +415,20 @@ public class HDFSEventSink extends AbstractSink implements Configurable {
           @Override
           public void run(String bucketPath) {
             LOG.info("Writer callback called.");
-            synchronized (sfWritersLock) {
-              sfWriters.remove(bucketPath);
-            }
+            sfWriters.remove(bucketPath);
+
           }
         };
-        synchronized (sfWritersLock) {
-          bucketWriter = sfWriters.get(lookupPath);
-          // we haven't seen this file yet, so open it and cache the handle
-          if (bucketWriter == null) {
-            hdfsWriter = writerFactory.getWriter(fileType);
-            bucketWriter = initializeBucketWriter(realPath, realName,
-              lookupPath, hdfsWriter, closeCallback);
-            sfWriters.put(lookupPath, bucketWriter);
-          }
+
+        bucketWriter = sfWriters.get(lookupPath);
+        // we haven't seen this file yet, so open it and cache the handle
+        if (bucketWriter == null) {
+          hdfsWriter = writerFactory.getWriter(fileType);
+          bucketWriter = initializeBucketWriter(realPath, realName,
+            lookupPath, hdfsWriter, closeCallback);
+          sfWriters.put(lookupPath, bucketWriter);
         }
+
 
         // track the buckets getting written in this transaction
         if (!writers.contains(bucketWriter)) {
@@ -430,9 +444,8 @@ public class HDFSEventSink extends AbstractSink implements Configurable {
           hdfsWriter = writerFactory.getWriter(fileType);
           bucketWriter = initializeBucketWriter(realPath, realName,
             lookupPath, hdfsWriter, closeCallback);
-          synchronized (sfWritersLock) {
-            sfWriters.put(lookupPath, bucketWriter);
-          }
+
+          sfWriters.put(lookupPath, bucketWriter);
           bucketWriter.append(event);
         }
       }
