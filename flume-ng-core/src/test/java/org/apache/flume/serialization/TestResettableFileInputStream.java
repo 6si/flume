@@ -143,6 +143,23 @@ public class TestResettableFileInputStream {
         .replaceAll("X", "\ufffd"), sb.toString());
   }
 
+  @Test
+  public void testUtf8DecodeEmoticons() throws IOException {
+    // Smiling_Face_With_Horns{2}-Smiling_Face_With_Halo
+    String expectedStr = "Emoticons: (\uD83D\uDE08\uD83D\uDE08-\uD83D\uDE07)\n";
+    Files.write(expectedStr.getBytes(Charsets.UTF_8), file);
+    PositionTracker tracker = new DurablePositionTracker(meta, file.getPath());
+    ResettableInputStream in = new ResettableFileInputStream(file, tracker,
+        0, Charsets.UTF_8, DecodeErrorPolicy.REPLACE);
+
+    int c;
+    StringBuilder sb = new StringBuilder();
+    while((c = in.readChar()) != -1) {
+      sb.append((char)c);
+    }
+    assertEquals(expectedStr, sb.toString());
+  }
+
   @Test(expected = MalformedInputException.class)
   public void testLatin1DecodeErrorHandlingFailMalformed() throws IOException {
     ByteArrayOutputStream out = new ByteArrayOutputStream();

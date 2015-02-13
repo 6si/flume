@@ -64,8 +64,8 @@ public class ResettableFileInputStream extends ResettableInputStream
   private final long fileSize;
   private final CharsetDecoder decoder;
   private long position;
-  private long syncPosition;
   private int maxCharWidth;
+  private int deltaLeftOver;
 
   /**
    *
@@ -105,16 +105,16 @@ public class ResettableFileInputStream extends ResettableInputStream
     this.tracker = tracker;
     this.in = new FileInputStream(file);
     this.chan = in.getChannel();
-    this.buf = ByteBuffer.allocateDirect(bufSize);
-    buf.flip();
     this.byteBuf = new byte[1]; // single byte
-    this.charBuf = CharBuffer.allocate(1); // single char
+    this.charBuf = CharBuffer.allocate(2); // exactly 2 chars needed to handle High+Low Surrogates for Java's native UTF-16 characters.
     charBuf.flip();
     this.fileSize = file.length();
     this.decoder = charset.newDecoder();
     this.position = 0;
-    this.syncPosition = 0;
-    this.maxCharWidth = (int)Math.ceil(charset.newEncoder().maxBytesPerChar());
+    this.maxCharWidth = maxBytesPerChar(charset);
+    this.deltaLeftOver = 0;
+    this.buf = ByteBuffer.allocateDirect((int)Math.max(bufSize, maxCharWidth));
+    buf.flip();
 
     CodingErrorAction errorAction;
     switch (decodeErrorPolicy) {
@@ -167,13 +167,18 @@ public class ResettableFileInputStream extends ResettableInputStream
       len = rem;
     }
     buf.get(b, off, len);
-    incrPosition(len, true);
+    incrPosition(len);
     return len;
   }
 
   @Override
   public synchronized int readChar() throws IOException {
-    // The decoder can have issues with multi-byte characters.
+    if (charBuf.hasRemaining()) {
+      char c = charBuf.get();
+      incrPosition(deltaLeftOver);
+      deltaLeftOver = 0;
+      return c;
+    }
     // This check ensures that there are at least maxCharWidth bytes in the buffer
     // before reaching EOF.
     if (buf.remaining() < maxCharWidth) {
@@ -183,35 +188,41 @@ public class ResettableFileInputStream extends ResettableInputStream
     }
 
     int start = buf.position();
-    charBuf.clear();
 
     boolean isEndOfInput = false;
     if (position >= fileSize) {
       isEndOfInput = true;
     }
 
-    CoderResult res = decoder.decode(buf, charBuf, isEndOfInput);
-    if (res.isMalformed() || res.isUnmappable()) {
-      res.throwException();
+    charBuf.clear();
+    charBuf.limit(0);
+    CoderResult res = CoderResult.OVERFLOW;
+    while (res.isOverflow() && charBuf.remaining() == charBuf.limit()) {
+      charBuf.limit(charBuf.limit()+1);
+      res = decoder.decode(buf, charBuf, isEndOfInput);
+      if (res.isMalformed() || res.isUnmappable()) {
+        res.throwException();
+      }
     }
 
     int delta = buf.position() - start;
-
+    deltaLeftOver = 0;
     charBuf.flip();
-    if (charBuf.hasRemaining()) {
-      char c = charBuf.get();
-      // don't increment the persisted location if we are in between a
-      // surrogate pair, otherwise we may never recover if we seek() to this
-      // location!
-      incrPosition(delta, !Character.isHighSurrogate(c));
-      return c;
 
-    // there may be a partial character in the decoder buffer
-    } else {
-      incrPosition(delta, false);
+    if (delta == 0) {
       return -1;
     }
 
+    if (charBuf.remaining() == 2 &&
+        Character.isSurrogatePair(charBuf.charAt(0), charBuf.charAt(1))) {
+      // We only update the position when the second
+      // lower surrogate is read in the next call to getChar().
+      // This guarantees a mark + reset will pick up the entire character.
+      deltaLeftOver = delta;
+    }
+
+    incrPosition(delta - deltaLeftOver);
+    return charBuf.get();
   }
 
   private void refillBuf() throws IOException {
@@ -248,9 +259,9 @@ public class ResettableFileInputStream extends ResettableInputStream
 
   @Override
   public long tell() throws IOException {
-    logger.trace("Tell position: {}", syncPosition);
+    logger.trace("Tell position: {}", position);
 
-    return syncPosition;
+    return position;
   }
 
   @Override
@@ -271,6 +282,11 @@ public class ResettableFileInputStream extends ResettableInputStream
       buf.flip();
     }
 
+    // clear the charBuf
+    charBuf.clear();
+    charBuf.flip();
+    deltaLeftOver = 0;
+
     // clear decoder state
     decoder.reset();
 
@@ -278,13 +294,26 @@ public class ResettableFileInputStream extends ResettableInputStream
     chan.position(newPos);
 
     // reset position pointers
-    position = syncPosition = newPos;
+    position = newPos;
   }
 
-  private void incrPosition(int incr, boolean updateSyncPosition) {
+  private void incrPosition(int incr) {
     position += incr;
-    if (updateSyncPosition) {
-      syncPosition = position;
+  }
+
+  private int maxBytesPerChar(Charset charset) {
+    String charsetName = charset.name();
+    if (charsetName.startsWith("UTF-8")) {
+      // some JDKs wrongly report 3 bytes max
+      return 4;
+    } else if (charsetName.startsWith("UTF-16")) {
+      // UTF_16BE and UTF_16LE wrongly report 2 bytes max
+      return 4;
+    } else if (charsetName.startsWith("UTF-32")) {
+      // UTF_32BE and UTF_32LE wrongly report 4 bytes max
+      return 8;
+    } else {
+      return (int) Math.ceil(charset.newEncoder().maxBytesPerChar());
     }
   }
 
